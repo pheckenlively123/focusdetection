@@ -35,6 +35,7 @@ func main() {
 	workers := flag.Int("workers", 4, "number of parallel workers")
 	size := flag.Int("size", 1024, "max long edge (px) of the JPEG sent to the VLM")
 	model := flag.String("model", "blur-detect", "llama-swap model alias")
+	prompt := flag.String("prompt", "", "text prompt sent with each image (default: the built-in strict-JSON blur prompt; a custom prompt must still ask for the same JSON verdict)")
 	force := flag.Bool("force", false, "re-analyze even if a sidecar with our namespace exists")
 	reportPath := flag.String("report", "", "write the JSON report to this file (default: stdout)")
 	flag.Parse()
@@ -48,6 +49,11 @@ func main() {
 	}
 	if len(cr3s) == 0 {
 		log.Fatalf("no .CR3 files found in %s", dir)
+	}
+	if strings.TrimSpace(*prompt) == "" {
+		*prompt = vllm.DefaultPrompt
+	} else {
+		log.Printf("using custom prompt (%d chars)", len(*prompt))
 	}
 	log.Printf("found %d CR3 file(s) in %s", len(cr3s), dir)
 
@@ -63,7 +69,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	rep, err := run(ctx, dir, *url, *workers, *size, *model, *force, cr3s)
+	rep, err := run(ctx, dir, *url, *workers, *size, *model, *prompt, *force, cr3s)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -98,7 +104,8 @@ func findCR3(dir string) ([]string, error) {
 // fileResult is the per-file entry in the report.
 type fileResult struct {
 	File          string `json:"file"`
-	Status        string `json:"status"` // sharp|blurry|failed|skipped
+	Status        string `json:"status"`           // sharp|blurry|failed|skipped
+	Rating        int    `json:"rating,omitempty"` // star rating: 1 blurry, 2 in focus
 	SubjectBlurry *bool  `json:"subject_blurry,omitempty"`
 	Confidence    int    `json:"confidence,omitempty"`
 	BlurType      string `json:"blur_type,omitempty"`
@@ -123,7 +130,7 @@ type report struct {
 
 // run processes files with a fixed worker pool. The VLM is serialized
 // by llama-server anyway; the pool parallelizes the sips develop step.
-func run(ctx context.Context, dir, url string, workers, size int, model string, force bool, files []string) (report, error) {
+func run(ctx context.Context, dir, url string, workers, size int, model, prompt string, force bool, files []string) (report, error) {
 	start := time.Now()
 	rep := report{
 		Dir:   dir,
@@ -170,7 +177,7 @@ func run(ctx context.Context, dir, url string, workers, size int, model string, 
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				v, err := processFile(ctx, url, size, model, files[i])
+				v, err := processFile(ctx, url, size, model, prompt, files[i])
 				res := &rep.Files[i]
 				if err == nil {
 					res.Status = "sharp"
@@ -179,6 +186,7 @@ func run(ctx context.Context, dir, url string, workers, size int, model string, 
 					}
 					b := v.SubjectBlurry
 					res.SubjectBlurry = &b
+					res.Rating = v.Rating()
 					res.Confidence = v.Confidence
 					res.BlurType = v.BlurType
 					res.Reason = v.Reason
@@ -215,15 +223,19 @@ func run(ctx context.Context, dir, url string, workers, size int, model string, 
 
 // progressLine renders the per-file progress line, e.g.
 //
-//	12/184  O47A0217.CR3  SHARP (conf 92)
-//	13/184  O47A0218.CR3  BLURRY (defocus, conf 71)
+//	12/184  O47A0217.CR3  ★★ SHARP (conf 92)
+//	13/184  O47A0218.CR3  ★ BLURRY (defocus, conf 71)
 //	14/184  O47A0219.CR3  FAILED: sips: exit status 1
+//
+// The leading star(s) are the rating written to the sidecar: 2 for
+// an in-focus subject, 1 for a blurry one.
 func progressLine(n, total int, base string, res *fileResult) string {
+	stars := strings.Repeat("★", res.Rating)
 	switch res.Status {
 	case "sharp":
-		return fmt.Sprintf("%d/%d  %s  SHARP (conf %d)", n, total, base, res.Confidence)
+		return fmt.Sprintf("%d/%d  %s  %s SHARP (conf %d)", n, total, base, stars, res.Confidence)
 	case "blurry":
-		return fmt.Sprintf("%d/%d  %s  BLURRY (%s, conf %d)", n, total, base, res.BlurType, res.Confidence)
+		return fmt.Sprintf("%d/%d  %s  %s BLURRY (%s, conf %d)", n, total, base, stars, res.BlurType, res.Confidence)
 	default:
 		return fmt.Sprintf("%d/%d  %s  FAILED: %s", n, total, base, res.Error)
 	}
@@ -231,16 +243,16 @@ func progressLine(n, total int, base string, res *fileResult) string {
 
 // processFile develops cr3Path to a resized JPEG, asks the VLM for a
 // blur verdict, and writes an XMP sidecar recording the result.
-func processFile(ctx context.Context, url string, size int, model, cr3Path string) (vllm.Verdict, error) {
+func processFile(ctx context.Context, url string, size int, model, prompt, cr3Path string) (vllm.Verdict, error) {
 	jpeg, err := cr3.Develop(ctx, cr3Path, size)
 	if err != nil {
 		return vllm.Verdict{}, err
 	}
-	v, err := vllm.Ask(ctx, url, model, jpeg)
+	v, err := vllm.Ask(ctx, url, model, prompt, jpeg)
 	if err != nil {
 		return vllm.Verdict{}, err
 	}
-	if err := xmp.WriteSidecar(ctx, cr3Path, v.SubjectBlurry, v.Confidence, v.BlurType, v.Reason, model); err != nil {
+	if err := xmp.WriteSidecar(ctx, cr3Path, v.SubjectBlurry, v.Rating(), v.Confidence, v.BlurType, v.Reason, model); err != nil {
 		return v, err
 	}
 	return v, nil

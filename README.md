@@ -2,7 +2,10 @@
 
 Detect whether the **main subject** of a Canon CR3 raw photo is in focus —
 defocus or motion blur — using a vision LLM, and record the verdict as an XMP
-sidecar next to each CR3.
+sidecar next to each CR3. Each photo also gets a star rating for culling:
+**1 star** for a blurry subject, **2 stars** for an in-focus subject, written
+to the sidecar as the standard `xmp:Rating` so culling tools (e.g.
+Lightroom) display it.
 
 Classic sharpness metrics (Laplacian variance, Tenengrad) measure the whole
 frame and are fooled by "sharp background, blurry subject". A VLM understands
@@ -96,12 +99,14 @@ sidecar.
 | `-workers` | `4` | parallel workers (sips parallelizes; the VLM is serialized by llama-server) |
 | `-size` | `1024` | max long edge (px) of the JPEG sent to the VLM |
 | `-model` | `blur-detect` | llama-swap model alias |
+| `-prompt` | *(built-in)* | text prompt sent with each image (default: the built-in strict-JSON blur prompt; a custom prompt must still ask for the same JSON verdict) |
 | `-force` | `false` | re-analyze even if a sidecar with our namespace exists |
 | `-report` | *(stdout)* | write the JSON report to this file |
 
 ```bash
 ./cr3blur ~/PhotoOnDeck/2026-10-03-RoseHomecoming
 ./cr3blur -report run.json -size 1280 ~/PhotoOnDeck/2026-10-03-RoseHomecoming
+./cr3blur -prompt 'Is the main subject tack-sharp? Ignore background softness. Reply with JSON only: {"subject_blurry":bool,"confidence":0-100,"blur_type":"none|defocus|motion|both","reason":"..."}' -force ~/PhotoOnDeck/2026-10-03-RoseHomecoming
 ```
 
 Behavior:
@@ -117,13 +122,16 @@ Behavior:
 - **Progress**: one line per completed file:
 
   ```
-  12/184  O47A0217.CR3  SHARP (conf 92)
-  13/184  O47A0218.CR3  BLURRY (defocus, conf 71)
+  12/184  O47A0217.CR3  ★★ SHARP (conf 92)
+  13/184  O47A0218.CR3  ★ BLURRY (defocus, conf 71)
   14/184  O47A0219.CR3  FAILED: sips: exit status 1
   ```
 
-- **Report**: a JSON summary (per-file verdicts + sharp/blurry/failed counts)
-  printed to stdout or written to `-report FILE`.
+  The star(s) before the status are the rating written to the sidecar
+  (2 = in focus, 1 = blurry).
+
+- **Report**: a JSON summary (per-file verdicts, star ratings, and
+  sharp/blurry/failed counts) printed to stdout or written to `-report FILE`.
 - **Exit codes**: `0` all ok, `1` fatal usage/env error, `2` completed with
   per-file failures.
 
@@ -136,6 +144,12 @@ defocus **and** motion blur and reply with a single JSON object:
 {"subject_blurry":bool,"confidence":0-100,"blur_type":"none|defocus|motion|both","reason":"..."}
 ```
 
+The built-in prompt can be overridden with `-prompt TEXT` — handy for
+prompt calibration (e.g. teaching the model to ignore background softness
+or shallow-DoF bokeh). The response is still parsed into the fixed JSON
+schema above, so a custom prompt must ask the model to reply with the
+same object, or every file fails verdict parsing.
+
 The response is parsed defensively (markdown fences / stray prose tolerated),
 validated against the `blur_type` enum and the 0–100 confidence range, and
 retried (1 s / 5 s backoff) on network errors and HTTP 5xx only.
@@ -147,12 +161,20 @@ One sidecar per CR3, using the Lightroom RAW sidecar convention:
 
 Verdicts live in a custom namespace — prefix `cr3blur:`,
 URI `http://github.com/pheckenlively123/focusdetection/xmp/1.0/` — with
-properties `SubjectBlurry`, `Confidence`, `BlurType`, `Reason`, `SourceFile`,
-`Model`, and `AnalyzedAt`.
+properties `SubjectBlurry`, `Rating`, `Confidence`, `BlurType`, `Reason`,
+`SourceFile`, `Model`, and `AnalyzedAt`.
+
+The star rating — **1** for a blurry subject, **2** for an in-focus subject
+— is also written to the standard `xmp:Rating` property (namespace
+`http://ns.adobe.com/xap/1.0/`) so culling tools like Lightroom display the
+stars directly.
 
 Existing sidecars are **never clobbered**: a sidecar carrying other
-namespaces (e.g. Lightroom ratings) gets our `<rdf:Description>` spliced in
-at the string level, everything else preserved byte-for-byte. Writes are
+namespaces (e.g. Lightroom pick flags, captions) gets our
+`<rdf:Description>` spliced in at the string level, everything else
+preserved byte-for-byte. The one exception is the star rating itself: the
+tool assigns it, so a pre-existing `<xmp:Rating>` (e.g. one Lightroom wrote)
+is replaced with ours, leaving a single rating in the file. Writes are
 atomic (temp file + rename).
 
 ## Repo layout

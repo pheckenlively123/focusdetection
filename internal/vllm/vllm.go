@@ -24,10 +24,23 @@ type Verdict struct {
 	Reason        string
 }
 
-// prompt is the strict-JSON instruction sent with each image
-// (ai-blur-detect.md §5). The model must answer with a single JSON
-// object and nothing else.
-const prompt = `Is the main subject of this photo in focus or blurry? Check defocus AND motion blur. Reply with JSON only: {"subject_blurry":bool,"confidence":0-100,"blur_type":"none|defocus|motion|both","reason":"..."}`
+// Rating is the star rating assigned to the photo for culling:
+// 1 star when the subject is blurry, 2 stars when it is in focus.
+// It is written to the sidecar as the standard xmp:Rating so culling
+// tools (e.g. Lightroom) display the stars.
+func (v Verdict) Rating() int {
+	if v.SubjectBlurry {
+		return 1
+	}
+	return 2
+}
+
+// DefaultPrompt is the strict-JSON instruction sent with each image
+// (ai-blur-detect.md §5) unless the caller overrides it (cr3blur
+// -prompt). The model must answer with a single JSON object and
+// nothing else; the response is still parsed into the fixed verdict
+// schema, so a custom prompt must ask for the same JSON fields.
+const DefaultPrompt = `Is the main subject of this photo in focus or blurry? Check defocus AND motion blur. Reply with JSON only: {"subject_blurry":bool,"confidence":0-100,"blur_type":"none|defocus|motion|both","reason":"..."}`
 
 const (
 	// requestTimeout bounds a single request. Image prefill is 1–4 s,
@@ -76,11 +89,15 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-// Ask sends jpeg to the VLM and returns the parsed verdict.
+// Ask sends jpeg to the VLM with the given text prompt and returns
+// the parsed verdict. Use DefaultPrompt for the stock blur prompt.
 //
 // Retries with 1 s / 5 s backoff on network errors and HTTP 5xx;
 // HTTP 4xx and verdict-parse errors are fatal for the caller.
-func Ask(ctx context.Context, base, model string, jpeg []byte) (Verdict, error) {
+func Ask(ctx context.Context, base, model, prompt string, jpeg []byte) (Verdict, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return Verdict{}, fmt.Errorf("vllm: empty prompt")
+	}
 	body, err := json.Marshal(chatRequest{
 		Model:       model,
 		Temperature: 0,

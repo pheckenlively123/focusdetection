@@ -10,8 +10,14 @@ Design background: `ai-blur-detect.md`.
 ## Status (2026-10-17)
 
 - Steps 1–4 implemented; `go build ./... && go vet ./... && go test ./...` clean.
-  Tests: xmp (packet shape, well-formedness, splice/merge, no-clobber),
-  vllm (verdict parsing), cr3 (sips plumbing).
+  Tests: xmp (packet shape, well-formedness, splice/merge, no-clobber,
+  rating replacement), vllm (verdict parsing, rating), cr3 (sips plumbing).
+- **Star ratings**: each photo gets a star rating — **1** for a blurry
+  subject, **2** for an in-focus subject (`Verdict.Rating()`) — written to
+  the sidecar as `cr3blur:Rating` and the standard `xmp:Rating` so culling
+  tools display the stars; progress lines and the JSON report include it.
+  A pre-existing `<xmp:Rating>` (e.g. from Lightroom) is replaced by ours;
+  all other third-party properties stay untouched.
 - Full 184-file run on `~/PhotoOnDeck/2026-10-03-RoseHomecoming` done:
   184/184 sidecars, well-formed, namespace present. Verdicts:
   **179 blurry / 5 sharp / 0 failed**. Confidence pattern: all blurry at
@@ -82,14 +88,17 @@ One sidecar per CR3: `O47A0217.CR3` → `O47A0217.xmp` (same directory, same bas
 - Custom namespace, prefix `cr3blur:`, URI `http://github.com/pheckenlively123/focusdetection/xmp/1.0/`
 - Properties (one `rdf:Description`):
   - `cr3blur:SubjectBlurry` — `true`/`false`
+  - `cr3blur:Rating` — star rating: `1` (blurry subject) or `2` (in focus); derived from `SubjectBlurry` via `Verdict.Rating()`, not from the VLM
   - `cr3blur:Confidence` — `0`–`100`
   - `cr3blur:BlurType` — `none|defocus|motion|both`
   - `cr3blur:Reason` — free text (escape XML entities)
   - `cr3blur:SourceFile` — CR3 base name
   - `cr3blur:Model` — model alias (`blur-detect`)
   - `cr3blur:AnalyzedAt` — ISO 8601 UTC
+  - `xmp:Rating` — the same star rating in the standard XMP namespace (`http://ns.adobe.com/xap/1.0/`), declared on our `rdf:Description`; this is what culling tools like Lightroom display as stars
 - Packet shape: `<?xpacket begin="…" id="W5M0MpCehiHzreSzNTczkc9d"?>` + `x:xmpmeta`/`rdf:RDF` + `<?xpacket end="w"?>`, with the UTF-8 BOM.
-- Existing sidecars: do **not** clobber third-party XMP (Lightroom ratings live here).
+- Star rating: the tool **assigns** the rating — 1 star for a blurry subject, 2 stars for an in-focus subject — and replaces any pre-existing `<xmp:Rating>` in the sidecar so the file carries a single rating. Other third-party properties (including Lightroom's own `lr:Rating`) are untouched.
+- Existing sidecars: do **not** clobber third-party XMP.
   - No sidecar → write our full packet.
   - Sidecar with only our namespace → rewrite it.
   - Sidecar with other namespaces → string-level splice: replace/insert our `<rdf:Description>` inside the existing `<rdf:RDF>` (no XML library needed; full RDF merge is a later enhancement).
@@ -103,8 +112,8 @@ One sidecar per CR3: `O47A0217.CR3` → `O47A0217.xmp` (same directory, same bas
   - `-model` (default `blur-detect`)
   - `-force` (re-analyze even if a sidecar with our namespace exists)
 - Resume: skip files whose sidecar already carries our namespace (unless `-force`) — matters for 500-shot folders and crash recovery.
-- Progress: one line per completed file — `12/184  O47A0217.CR3  SHARP (conf 92)`.
-- Report: JSON summary at the end (per-file verdict + counts of sharp/blurry/failed); stdout, or `-report <file>`.
+- Progress: one line per completed file, star rating first — `12/184  O47A0217.CR3  ★★ SHARP (conf 92)` (2 stars in focus, 1 star blurry).
+- Report: JSON summary at the end (per-file verdict + `rating` + counts of sharp/blurry/failed); stdout, or `-report <file>`.
 - Exit codes: `0` all ok, `1` fatal usage/env error, `2` completed with per-file failures.
 
 ## Step 5 (optional, deferred) — `internal/sharp` triage

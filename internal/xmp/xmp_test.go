@@ -35,7 +35,7 @@ func mustRead(t *testing.T, p string) string {
 
 func TestWriteSidecarNew(t *testing.T) {
 	cr3Path := filepath.Join(t.TempDir(), "O47A0217.CR3")
-	if err := WriteSidecar(context.Background(), cr3Path, true, 71, "defocus",
+	if err := WriteSidecar(context.Background(), cr3Path, true, 1, 71, "defocus",
 		`blur <subject> & "motion"`, "blur-detect"); err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,10 @@ func TestWriteSidecarNew(t *testing.T) {
 	}
 	for _, want := range []string{
 		nsURI,
+		xmpCoreNS,
 		`<cr3blur:SubjectBlurry>true</cr3blur:SubjectBlurry>`,
+		`<cr3blur:Rating>1</cr3blur:Rating>`,
+		`<xmp:Rating>1</xmp:Rating>`,
 		`<cr3blur:Confidence>71</cr3blur:Confidence>`,
 		`<cr3blur:BlurType>defocus</cr3blur:BlurType>`,
 		`<cr3blur:Reason>blur &lt;subject&gt; &amp; &quot;motion&quot;</cr3blur:Reason>`,
@@ -86,7 +89,7 @@ func TestWriteSidecarNoClobber(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := WriteSidecar(context.Background(), cr3Path, false, 92, "none", "in focus", "blur-detect"); err != nil {
+	if err := WriteSidecar(context.Background(), cr3Path, false, 2, 92, "none", "in focus", "blur-detect"); err != nil {
 		t.Fatal(err)
 	}
 	got := mustRead(t, sidecar)
@@ -99,15 +102,27 @@ func TestWriteSidecarNoClobber(t *testing.T) {
 	if n := strings.Count(got, "xmlns:cr3blur"); n != 1 {
 		t.Errorf("xmlns:cr3blur count = %d, want 1", n)
 	}
+	if n := strings.Count(got, `<xmp:Rating>`); n != 1 {
+		t.Errorf("xmp:Rating count = %d, want 1\n%s", n, got)
+	}
+	if !strings.Contains(got, `<xmp:Rating>2</xmp:Rating>`) {
+		t.Errorf("sharp rating (2 stars) missing:\n%s", got)
+	}
 	assertWellFormed(t, got)
 
 	// Re-writing must replace our block, not duplicate it.
-	if err := WriteSidecar(context.Background(), cr3Path, true, 55, "motion", "moved", "blur-detect"); err != nil {
+	if err := WriteSidecar(context.Background(), cr3Path, true, 1, 55, "motion", "moved", "blur-detect"); err != nil {
 		t.Fatal(err)
 	}
 	got = mustRead(t, sidecar)
 	if n := strings.Count(got, "xmlns:cr3blur"); n != 1 {
 		t.Errorf("after re-write, xmlns:cr3blur count = %d, want 1", n)
+	}
+	if n := strings.Count(got, `<xmp:Rating>`); n != 1 {
+		t.Errorf("after re-write, xmp:Rating count = %d, want 1\n%s", n, got)
+	}
+	if !strings.Contains(got, `<xmp:Rating>1</xmp:Rating>`) {
+		t.Errorf("re-written rating (1 star) missing:\n%s", got)
 	}
 	if !strings.Contains(got, `<lr:Rating>4</lr:Rating>`) {
 		t.Errorf("third-party property lost on re-write:\n%s", got)
@@ -118,12 +133,48 @@ func TestWriteSidecarNoClobber(t *testing.T) {
 	assertWellFormed(t, got)
 }
 
-func TestWriteSidecarRewriteOursOnly(t *testing.T) {
+// TestWriteSidecarReplacesExistingRating: Lightroom writes both
+// lr:Rating and the standard xmp:Rating. Our run must replace the
+// star rating (it is ours to assign) while preserving the rest.
+func TestWriteSidecarReplacesExistingRating(t *testing.T) {
 	cr3Path := filepath.Join(t.TempDir(), "O47A0217.CR3")
-	if err := WriteSidecar(context.Background(), cr3Path, false, 50, "none", "old", "blur-detect"); err != nil {
+	sidecar := SidecarPath(cr3Path)
+	thirdParty := "\uFEFF<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n" +
+		`<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.2">` + "\n" +
+		`<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">` + "\n" +
+		` <rdf:Description rdf:about="" xmlns:lr="http://ns.adobe.com/lightroom/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">` + "\n" +
+		`  <lr:Rating>4</lr:Rating>` + "\n" +
+		`  <xmp:Rating>4</xmp:Rating>` + "\n" +
+		` </rdf:Description>` + "\n" +
+		`</rdf:RDF>` + "\n" +
+		`</x:xmpmeta>` + "\n" +
+		`<?xpacket end="w"?>`
+	if err := os.WriteFile(sidecar, []byte(thirdParty), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteSidecar(context.Background(), cr3Path, true, 88, "both", "new", "blur-detect"); err != nil {
+
+	if err := WriteSidecar(context.Background(), cr3Path, true, 1, 71, "defocus", "soft subject", "blur-detect"); err != nil {
+		t.Fatal(err)
+	}
+	got := mustRead(t, sidecar)
+	if n := strings.Count(got, `<xmp:Rating>`); n != 1 {
+		t.Errorf("xmp:Rating count = %d, want 1 (ours):\n%s", n, got)
+	}
+	if !strings.Contains(got, `<xmp:Rating>1</xmp:Rating>`) {
+		t.Errorf("our rating (1 star) missing:\n%s", got)
+	}
+	if !strings.Contains(got, `<lr:Rating>4</lr:Rating>`) {
+		t.Errorf("third-party lr:Rating lost:\n%s", got)
+	}
+	assertWellFormed(t, got)
+}
+
+func TestWriteSidecarRewriteOursOnly(t *testing.T) {
+	cr3Path := filepath.Join(t.TempDir(), "O47A0217.CR3")
+	if err := WriteSidecar(context.Background(), cr3Path, false, 2, 50, "none", "old", "blur-detect"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSidecar(context.Background(), cr3Path, true, 1, 88, "both", "new", "blur-detect"); err != nil {
 		t.Fatal(err)
 	}
 	got := mustRead(t, SidecarPath(cr3Path))
@@ -142,7 +193,7 @@ func TestWriteSidecarRefusesUnrecognized(t *testing.T) {
 	if err := os.WriteFile(sidecar, []byte("not xml at all"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteSidecar(context.Background(), cr3Path, false, 50, "none", "x", "blur-detect"); err == nil {
+	if err := WriteSidecar(context.Background(), cr3Path, false, 2, 50, "none", "x", "blur-detect"); err == nil {
 		t.Fatal("expected error for unrecognized sidecar, got nil")
 	}
 	if got := mustRead(t, sidecar); got != "not xml at all" {

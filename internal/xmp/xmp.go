@@ -1,8 +1,9 @@
 // Package xmp reads and writes XMP sidecar files — a .xmp file with
 // the same base name as each .CR3 (the Lightroom RAW sidecar
 // convention) — recording the in-focus verdict (subject_blurry,
-// confidence, blur_type, reason) so the result survives into culling
-// tools that read XMP sidecars.
+// confidence, blur_type, reason) and the resulting star rating
+// (1 = blurry subject, 2 = in focus) so the result survives into
+// culling tools that read XMP sidecars.
 //
 // Our verdict lives in a custom namespace (cr3blur:,
 // http://github.com/pheckenlively123/focusdetection/xmp/1.0/) so it
@@ -27,10 +28,13 @@ import (
 const (
 	nsPrefix = "cr3blur"
 	nsURI    = "http://github.com/pheckenlively123/focusdetection/xmp/1.0/"
-	packetID = "W5M0MpCehiHzreSzNTczkc9d"
-	rdfNS    = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-	xmpNS    = "adobe:ns:meta/"
-	bom      = "\uFEFF"
+	// xmpCoreNS is the standard XMP namespace. Its Rating property
+	// (0–5) is the star rating culling tools like Lightroom display.
+	xmpCoreNS = "http://ns.adobe.com/xap/1.0/"
+	packetID  = "W5M0MpCehiHzreSzNTczkc9d"
+	rdfNS     = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+	xmpNS     = "adobe:ns:meta/"
+	bom       = "\uFEFF"
 )
 
 // SidecarPath returns the .xmp sidecar path for a CR3 file
@@ -54,7 +58,11 @@ func HasVerdict(cr3Path string) (bool, error) {
 	return strings.Contains(string(b), nsURI), nil
 }
 
-// WriteSidecar records the verdict for cr3Path in its .xmp sidecar.
+// WriteSidecar records the verdict and the star rating for cr3Path
+// in its .xmp sidecar. The rating is the star rating assigned for
+// culling: 1 for a blurry subject, 2 for an in-focus subject. It is
+// stored both in our namespace (cr3blur:Rating) and as the standard
+// xmp:Rating so culling tools like Lightroom display the stars.
 //
 //   - no sidecar (or empty) → write a full packet with our namespace
 //   - sidecar with only our namespace → rewrite it
@@ -62,8 +70,12 @@ func HasVerdict(cr3Path string) (bool, error) {
 //     <rdf:Description> inside the existing <rdf:RDF>, preserving
 //     everything else byte-for-byte
 //
+// The star rating is ours to assign: a pre-existing <xmp:Rating>
+// (e.g. one Lightroom wrote) is replaced by ours so the file carries
+// a single rating.
+//
 // The write is atomic (temp file + rename).
-func WriteSidecar(ctx context.Context, cr3Path string, subjectBlurry bool, confidence int, blurType, reason, model string) error {
+func WriteSidecar(ctx context.Context, cr3Path string, subjectBlurry bool, rating, confidence int, blurType, reason, model string) error {
 	sidecar := SidecarPath(cr3Path)
 	existing, err := os.ReadFile(sidecar)
 	if err != nil && !os.IsNotExist(err) {
@@ -73,7 +85,7 @@ func WriteSidecar(ctx context.Context, cr3Path string, subjectBlurry bool, confi
 		return ctx.Err()
 	}
 
-	block := descriptionBlock(subjectBlurry, confidence, blurType, reason, model, filepath.Base(cr3Path), time.Now().UTC().Format(time.RFC3339))
+	block := descriptionBlock(subjectBlurry, rating, confidence, blurType, reason, model, filepath.Base(cr3Path), time.Now().UTC().Format(time.RFC3339))
 	var out string
 	switch {
 	case os.IsNotExist(err) || len(strings.TrimSpace(string(existing))) == 0:
@@ -81,7 +93,11 @@ func WriteSidecar(ctx context.Context, cr3Path string, subjectBlurry bool, confi
 	case strings.Contains(string(existing), nsURI) && !hasOtherNamespaces(string(existing)):
 		out = fullPacket(block)
 	default:
-		s := replaceOurBlock(string(existing), block)
+		// The star rating is ours to assign: drop any pre-existing
+		// <xmp:Rating> (e.g. from a Lightroom sidecar) so the file
+		// carries a single, authoritative rating.
+		s := xmpRatingRe.ReplaceAllString(string(existing), "")
+		s = replaceOurBlock(s, block)
 		if !strings.Contains(s, nsURI) {
 			// No block of ours yet: insert before </rdf:RDF>.
 			i := strings.Index(s, "</rdf:RDF>")
@@ -116,17 +132,21 @@ func WriteSidecar(ctx context.Context, cr3Path string, subjectBlurry bool, confi
 	return nil
 }
 
-// descriptionBlock renders our single <rdf:Description>.
-func descriptionBlock(subjectBlurry bool, confidence int, blurType, reason, model, sourceFile, analyzedAt string) string {
+// descriptionBlock renders our single <rdf:Description>, carrying the
+// verdict in our namespace and the star rating as the standard
+// xmp:Rating.
+func descriptionBlock(subjectBlurry bool, rating, confidence int, blurType, reason, model, sourceFile, analyzedAt string) string {
 	p := nsPrefix
-	return "<rdf:Description rdf:about=\"\" xmlns:" + p + "=\"" + nsURI + "\">" +
+	return "<rdf:Description rdf:about=\"\" xmlns:" + p + "=\"" + nsURI + "\" xmlns:xmp=\"" + xmpCoreNS + "\">" +
 		"<" + p + ":SubjectBlurry>" + strconv.FormatBool(subjectBlurry) + "</" + p + ":SubjectBlurry>" +
+		"<" + p + ":Rating>" + strconv.Itoa(rating) + "</" + p + ":Rating>" +
 		"<" + p + ":Confidence>" + strconv.Itoa(confidence) + "</" + p + ":Confidence>" +
 		"<" + p + ":BlurType>" + xmlEscape(blurType) + "</" + p + ":BlurType>" +
 		"<" + p + ":Reason>" + xmlEscape(reason) + "</" + p + ":Reason>" +
 		"<" + p + ":SourceFile>" + xmlEscape(sourceFile) + "</" + p + ":SourceFile>" +
 		"<" + p + ":Model>" + xmlEscape(model) + "</" + p + ":Model>" +
 		"<" + p + ":AnalyzedAt>" + xmlEscape(analyzedAt) + "</" + p + ":AnalyzedAt>" +
+		"<xmp:Rating>" + strconv.Itoa(rating) + "</xmp:Rating>" +
 		"</rdf:Description>"
 }
 
@@ -152,8 +172,14 @@ func fullPacket(block string) string {
 // xmlnsDecl matches xmlns:prefix="uri" declarations.
 var xmlnsDecl = regexp.MustCompile(`xmlns:(\w[\w.-]*)="[^"]*"`)
 
+// xmpRatingRe matches a standard XMP rating element.
+var xmpRatingRe = regexp.MustCompile(`<xmp:Rating>[^<]*</xmp:Rating>`)
+
 // hasOtherNamespaces reports whether s declares any XML namespace
 // other than rdf:, x: (the xmpmeta meta-namespace) and our own.
+// Note: the xmp: prefix (used for our star rating) is deliberately
+// NOT allowlisted, so a sidecar that mixes our namespace with
+// third-party XMP-core properties is spliced, never rewritten.
 func hasOtherNamespaces(s string) bool {
 	for _, m := range xmlnsDecl.FindAllStringSubmatch(s, -1) {
 		if m[1] != "rdf" && m[1] != "x" && m[1] != nsPrefix {

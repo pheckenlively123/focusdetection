@@ -1,6 +1,9 @@
 package vllm
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestParseVerdict(t *testing.T) {
 	cases := []struct {
@@ -76,6 +79,22 @@ func TestParseVerdict(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAskEmptyPrompt(t *testing.T) {
+	_, err := Ask(context.Background(), "http://127.0.0.1:1", "blur-detect", "   ", []byte{})
+	if err == nil {
+		t.Fatal("expected error for empty prompt")
+	}
+}
+
+func TestVerdictRating(t *testing.T) {
+	if got := (Verdict{SubjectBlurry: true}).Rating(); got != 1 {
+		t.Errorf("blurry verdict rating = %d, want 1 star", got)
+	}
+	if got := (Verdict{SubjectBlurry: false}).Rating(); got != 2 {
+		t.Errorf("in-focus verdict rating = %d, want 2 stars", got)
 	}
 }
 
