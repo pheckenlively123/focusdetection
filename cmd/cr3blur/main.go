@@ -30,7 +30,8 @@ func main() {
 	log.SetFlags(0)
 	log.SetPrefix("cr3blur: ")
 
-	url := flag.String("url", "http://127.0.0.1:8080", "llama-swap endpoint (OpenAI-compatible /v1)")
+	url := flag.String("url", "http://127.0.0.1:9006",
+		"OpenAI-compatible endpoint: default is the blur-detect llama-server port (see the llama-swap config); pass the llama-swap listener (e.g. http://127.0.0.1:8080) to route through llama-swap instead")
 	workers := flag.Int("workers", 4, "number of parallel workers")
 	size := flag.Int("size", 1024, "max long edge (px) of the JPEG sent to the VLM")
 	model := flag.String("model", "blur-detect", "llama-swap model alias")
@@ -51,8 +52,12 @@ func main() {
 	log.Printf("found %d CR3 file(s) in %s", len(cr3s), dir)
 
 	ctx := context.Background()
-	// Warmup: load (or swap in) the model before the pool starts so
-	// model load stays out of the per-file timing.
+	// Warmup: verify the endpoint and (when routing through
+	// llama-swap) load/swap in the model before the pool starts, so
+	// model load stays out of the per-file timing. Note: pointed
+	// directly at the llama-server port (the default), the model must
+	// already be loaded — llama-swap loads it lazily and the port
+	// refuses connections until then.
 	log.Printf("warming up model %q at %s ...", *model, *url)
 	if err := vllm.Warmup(ctx, *url, *model); err != nil {
 		log.Fatal(err)

@@ -9,11 +9,18 @@ frame and are fooled by "sharp background, blurry subject". A VLM understands
 *what the subject is*, which is the right judge for subject-level blur.
 
 ```
-.CR3 ──sips──▶ JPEG (≤1024 px) ──base64──▶ llama-swap :8080 ─▶ llama-server :9006
-                                                          (Qwen2.5-VL-7B + mmproj)
+.CR3 ──sips──▶ JPEG (≤1024 px) ──base64──▶ llama-server :9006
+                                            (Qwen2.5-VL-7B + mmproj)
 report ◀── JSON verdicts ◀───────────────────────────────────┘
 sidecar ◀── .xmp (cr3blur: namespace) ◀────────────────────────┘
 ```
+
+By default `cr3blur` talks directly to the llama-server port that the
+llama-swap config assigns to the `blur-detect` model (9006). Pass
+`-url http://127.0.0.1:8080` to route through the llama-swap listener
+instead (needed if you want llama-swap to lazy-load/swap the model).
+Note the model port refuses connections until llama-swap has loaded the
+model, so with the default direct URL the model must already be loaded.
 
 ## Requirements
 
@@ -85,7 +92,7 @@ sidecar.
 
 | Flag | Default | Description |
 |---|---|---|
-| `-url` | `http://127.0.0.1:8080` | llama-swap endpoint (OpenAI-compatible `/v1`) |
+| `-url` | `http://127.0.0.1:9006` | OpenAI-compatible endpoint — default: the `blur-detect` llama-server port from the llama-swap config; or the llama-swap listener (e.g. `http://127.0.0.1:8080`) |
 | `-workers` | `4` | parallel workers (sips parallelizes; the VLM is serialized by llama-server) |
 | `-size` | `1024` | max long edge (px) of the JPEG sent to the VLM |
 | `-model` | `blur-detect` | llama-swap model alias |
@@ -100,9 +107,10 @@ sidecar.
 Behavior:
 
 - **Warmup**: before the worker pool starts, `cr3blur` does a health check plus
-  a minimal completion against the alias. llama-swap loads models lazily on
-  the first request (the health endpoint only checks the proxy), so this keeps
-  model load/swap out of the per-file timing.
+  a minimal completion against the alias, keeping model load/swap out of the
+  per-file timing. Pointed at the llama-swap listener, this also triggers the
+  lazy model load; with the default direct llama-server URL it only verifies
+  the model is already up.
 - **Resume**: files whose sidecar already carries our namespace are skipped
   (use `-force` to re-analyze) — matters for 500-shot folders and crash
   recovery.
@@ -184,6 +192,8 @@ verdict parsing (fenced, prose-wrapped, invalid), and the sips plumbing.
 - **Don't run long `cr3blur` batches while other llama-swap clients are
   active.** The swap server is a single slot: concurrent use evicts
   `blur-detect` mid-run and a full swap cycle can exceed per-file timeouts.
+  With the default direct model-port URL, an eviction surfaces as
+  connection-refused on subsequent requests.
 
 ## License
 
