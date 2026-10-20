@@ -2,7 +2,7 @@
 
 Goal: `cr3blur [flags] DIR` runs end-to-end — develops each CR3 to a
 resized JPEG, gets a focus verdict from the VLM via llama-swap, and
-writes an XMP sidecar (`<base>.xmp`) next to each CR3 recording it.
+writes an XMP sidecar (`<base>.XMP`) next to each CR3 recording it.
 
 Scaffold from Phase 01 is in place (`cmd/cr3blur`, `internal/{cr3,vllm,sharp,xmp}`).
 Design background: `ai-blur-detect.md`.
@@ -83,7 +83,7 @@ func Ask(ctx context.Context, base, model string, jpeg []byte) (Verdict, error)
 
 ## Step 3 — `internal/xmp`: sidecar writer
 
-One sidecar per CR3: `O47A0217.CR3` → `O47A0217.xmp` (same directory, same base name — the Lightroom sidecar convention for RAW).
+One sidecar per CR3: `O47A0217.CR3` → `O47A0217.XMP` (same directory, same base name — the Lightroom sidecar convention for RAW).
 
 - Custom namespace, prefix `cr3blur:`, URI `http://github.com/pheckenlively123/focusdetection/xmp/1.0/`
 - Properties (one `rdf:Description`):
@@ -102,7 +102,7 @@ One sidecar per CR3: `O47A0217.CR3` → `O47A0217.xmp` (same directory, same bas
   - No sidecar → write our full packet.
   - Sidecar with only our namespace → rewrite it.
   - Sidecar with other namespaces → string-level splice: replace/insert our `<rdf:Description>` inside the existing `<rdf:RDF>` (no XML library needed; full RDF merge is a later enhancement).
-- API: `WriteSidecar(ctx, cr3Path string, v vllm.Verdict, model string) error` — takes the CR3 path and derives the `.xmp` path (keeps `internal/xmp` free of a dependency on `internal/vllm` by accepting a small local verdict type or plain fields — decide at implementation time, plain fields preferred).
+- API: `WriteSidecar(ctx, cr3Path string, v vllm.Verdict, model string) error` — takes the CR3 path and derives the `.XMP` path (keeps `internal/xmp` free of a dependency on `internal/vllm` by accepting a small local verdict type or plain fields — decide at implementation time, plain fields preferred).
 
 ## Step 4 — wire `processFile` + CLI polish
 
@@ -126,6 +126,6 @@ still the authoritative judge for the band.
 ## Test & acceptance
 
 - Labeled sample: hand-label ~20 shots from `~/PhotoOnDeck/2026-10-03-RoseHomecoming` (sharp / blurry-subject / motion), run the tool, compare verdicts. This is the prompt + confidence-threshold calibration step (ai-blur-detect.md §9.4).
-- Sidecar check: `.xmp` files exist, XML is well-formed, our namespace present; re-run with mixed sidecars (add a fake third-party `lr:Description` to one) and confirm merge, not clobber.
+- Sidecar check: `.XMP` files exist, XML is well-formed, our namespace present; re-run with mixed sidecars (add a fake third-party `lr:Description` to one) and confirm merge, not clobber.
 - Resume: run a 30-file subset, kill mid-run, re-run — only unfinished files are processed.
 - Throughput: measure on the full 184-file folder against the 20–30 photos/min estimate (§7).

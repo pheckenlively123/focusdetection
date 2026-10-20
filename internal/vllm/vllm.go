@@ -263,6 +263,9 @@ func Warmup(ctx context.Context, base, model string) error {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") {
+			return fmt.Errorf("vllm: warmup: nothing is listening at %s — is that server running? If %s is a llama-swap model port, the model is not loaded yet (llama-swap loads it lazily on the first request, and the port refuses connections until then): point -url at the llama-swap listener (e.g. http://127.0.0.1:8080) so this warmup triggers the load, or load the model first", root, root)
+		}
 		return fmt.Errorf("vllm: warmup: %w", err)
 	}
 	io.Copy(io.Discard, resp.Body)

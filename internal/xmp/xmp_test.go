@@ -203,7 +203,7 @@ func TestWriteSidecarRefusesUnrecognized(t *testing.T) {
 
 func TestSidecarPath(t *testing.T) {
 	got := SidecarPath("/a/b/O47A0217.CR3")
-	if want := "/a/b/O47A0217.xmp"; got != want {
+	if want := "/a/b/O47A0217.XMP"; got != want {
 		t.Errorf("SidecarPath = %q, want %q", got, want)
 	}
 }

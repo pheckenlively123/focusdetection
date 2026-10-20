@@ -12,18 +12,19 @@ frame and are fooled by "sharp background, blurry subject". A VLM understands
 *what the subject is*, which is the right judge for subject-level blur.
 
 ```
-.CR3 ──sips──▶ JPEG (≤1024 px) ──base64──▶ llama-server :9006
-                                            (Qwen2.5-VL-7B + mmproj)
-report ◀── JSON verdicts ◀───────────────────────────────────┘
-sidecar ◀── .xmp (cr3blur: namespace) ◀────────────────────────┘
+.CR3 ──sips──▶ JPEG (≤1024 px) ──base64──▶ llama-swap :8080 ─▶ llama-server :9006
+                                                                (Qwen2.5-VL-7B + mmproj)
+report ◀── JSON verdicts ◀──────────────────────────────────────────────────────┘
+sidecar ◀── .XMP (cr3blur: namespace) ◀─────────────────────────────────────────┘
 ```
 
-By default `cr3blur` talks directly to the llama-server port that the
-llama-swap config assigns to the `blur-detect` model (9006). Pass
-`-url http://127.0.0.1:8080` to route through the llama-swap listener
-instead (needed if you want llama-swap to lazy-load/swap the model).
-Note the model port refuses connections until llama-swap has loaded the
-model, so with the default direct URL the model must already be loaded.
+By default `cr3blur` routes through the llama-swap listener
+(`http://127.0.0.1:8080`), so its warmup triggers the lazy load/swap of
+the `blur-detect` model — no separate load step. Pass
+`-url http://127.0.0.1:9006` to talk to the llama-server port directly
+instead (skips the proxy hop; the port refuses connections until
+llama-swap has loaded the model, so it requires the model to already be
+resident).
 
 ## Requirements
 
@@ -95,7 +96,7 @@ sidecar.
 
 | Flag | Default | Description |
 |---|---|---|
-| `-url` | `http://127.0.0.1:9006` | OpenAI-compatible endpoint — default: the `blur-detect` llama-server port from the llama-swap config; or the llama-swap listener (e.g. `http://127.0.0.1:8080`) |
+| `-url` | `http://127.0.0.1:8080` | OpenAI-compatible endpoint — default: the llama-swap listener (warmup triggers the lazy model load/swap); pass the direct llama-server port (e.g. `http://127.0.0.1:9006` from the llama-swap config) to skip the proxy when the model is already resident |
 | `-workers` | `4` | parallel workers (sips parallelizes; the VLM is serialized by llama-server) |
 | `-size` | `1024` | max long edge (px) of the JPEG sent to the VLM |
 | `-model` | `blur-detect` | llama-swap model alias |
@@ -113,9 +114,10 @@ Behavior:
 
 - **Warmup**: before the worker pool starts, `cr3blur` does a health check plus
   a minimal completion against the alias, keeping model load/swap out of the
-  per-file timing. Pointed at the llama-swap listener, this also triggers the
-  lazy model load; with the default direct llama-server URL it only verifies
-  the model is already up.
+  per-file timing, and logs how long it took. With the default llama-swap
+  listener URL this also triggers the lazy model load (a one-time ~30–90 s
+  swap-in if another model is resident — the log line says so); pointed at
+  the direct model port it only verifies the model is already up.
 - **Resume**: files whose sidecar already carries our namespace are skipped
   (use `-force` to re-analyze) — matters for 500-shot folders and crash
   recovery.
@@ -157,7 +159,7 @@ retried (1 s / 5 s backoff) on network errors and HTTP 5xx only.
 ## XMP sidecars
 
 One sidecar per CR3, using the Lightroom RAW sidecar convention:
-`O47A0217.CR3` → `O47A0217.xmp` (same directory, same base name).
+`O47A0217.CR3` → `O47A0217.XMP` (same directory, same base name).
 
 Verdicts live in a custom namespace — prefix `cr3blur:`,
 URI `http://github.com/pheckenlively123/focusdetection/xmp/1.0/` — with
@@ -214,8 +216,9 @@ verdict parsing (fenced, prose-wrapped, invalid), and the sips plumbing.
 - **Don't run long `cr3blur` batches while other llama-swap clients are
   active.** The swap server is a single slot: concurrent use evicts
   `blur-detect` mid-run and a full swap cycle can exceed per-file timeouts.
-  With the default direct model-port URL, an eviction surfaces as
-  connection-refused on subsequent requests.
+  With a direct model-port URL (`-url http://127.0.0.1:9006`), an eviction
+  surfaces as connection-refused on subsequent requests; through the
+  llama-swap listener the next request waits out the swap instead.
 
 ## License
 

@@ -1,4 +1,4 @@
-// Package xmp reads and writes XMP sidecar files — a .xmp file with
+// Package xmp reads and writes XMP sidecar files — a .XMP file with
 // the same base name as each .CR3 (the Lightroom RAW sidecar
 // convention) — recording the in-focus verdict (subject_blurry,
 // confidence, blur_type, reason) and the resulting star rating
@@ -37,12 +37,12 @@ const (
 	bom       = "\uFEFF"
 )
 
-// SidecarPath returns the .xmp sidecar path for a CR3 file
-// (same directory, same base name: O47A0217.CR3 → O47A0217.xmp).
+// SidecarPath returns the .XMP sidecar path for a CR3 file
+// (same directory, same base name: O47A0217.CR3 → O47A0217.XMP).
 func SidecarPath(cr3Path string) string {
 	base := filepath.Base(cr3Path)
 	name := strings.TrimSuffix(base, filepath.Ext(base))
-	return filepath.Join(filepath.Dir(cr3Path), name+".xmp")
+	return filepath.Join(filepath.Dir(cr3Path), name+".XMP")
 }
 
 // HasVerdict reports whether the sidecar for cr3Path exists and
@@ -59,7 +59,7 @@ func HasVerdict(cr3Path string) (bool, error) {
 }
 
 // WriteSidecar records the verdict and the star rating for cr3Path
-// in its .xmp sidecar. The rating is the star rating assigned for
+// in its .XMP sidecar. The rating is the star rating assigned for
 // culling: 1 for a blurry subject, 2 for an in-focus subject. It is
 // stored both in our namespace (cr3blur:Rating) and as the standard
 // xmp:Rating so culling tools like Lightroom display the stars.
