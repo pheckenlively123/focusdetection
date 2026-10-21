@@ -8,10 +8,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image/jpeg"
 	"io/fs"
 	"log"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pheckenlively123/focusdetection/internal/afbox"
 	cr3 "github.com/pheckenlively123/focusdetection/internal/cr3"
 	"github.com/pheckenlively123/focusdetection/internal/vllm"
 	"github.com/pheckenlively123/focusdetection/internal/xmp"
@@ -116,7 +119,10 @@ type fileResult struct {
 	Confidence    int    `json:"confidence,omitempty"`
 	BlurType      string `json:"blur_type,omitempty"`
 	Reason        string `json:"reason,omitempty"`
-	Error         string `json:"error,omitempty"`
+	// AFBox is the camera's autofocus box "x,y,w,h" in the pixels of the
+	// JPEG sent to the VLM ("" when the EXIF carried no usable box).
+	AFBox string `json:"af_box,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // report is the JSON summary printed at the end of a run.
@@ -130,6 +136,7 @@ type report struct {
 	Sharp    int          `json:"sharp"`
 	Blurry   int          `json:"blurry"`
 	Failed   int          `json:"failed"`
+	AFBoxes  int          `json:"af_boxes"` // files with an AF box in the prompt
 	Duration string       `json:"duration"`
 	Files    []fileResult `json:"files"`
 }
@@ -183,8 +190,9 @@ func run(ctx context.Context, dir, url string, workers, size int, model, prompt 
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				v, err := processFile(ctx, url, size, model, prompt, files[i])
+				v, afBox, err := processFile(ctx, url, size, model, prompt, files[i])
 				res := &rep.Files[i]
+				res.AFBox = afBox
 				if err == nil {
 					res.Status = "sharp"
 					if v.SubjectBlurry {
@@ -210,6 +218,9 @@ func run(ctx context.Context, dir, url string, workers, size int, model, prompt 
 				case "failed":
 					rep.Failed++
 				}
+				if res.AFBox != "" {
+					rep.AFBoxes++
+				}
 				n := done
 				mu.Unlock()
 				log.Print(progressLine(n, rep.Total, res.File, res))
@@ -229,39 +240,63 @@ func run(ctx context.Context, dir, url string, workers, size int, model, prompt 
 
 // progressLine renders the per-file progress line, e.g.
 //
-//	12/184  O47A0217.CR3  ★★ SHARP (conf 92)
+//	12/184  O47A0217.CR3  ★★ SHARP (conf 92)  [AF 448,356,55,56]
 //	13/184  O47A0218.CR3  ★ BLURRY (defocus, conf 71)
 //	14/184  O47A0219.CR3  FAILED: sips: exit status 1
 //
 // The leading star(s) are the rating written to the sidecar: 2 for
-// an in-focus subject, 1 for a blurry one.
+// an in-focus subject, 1 for a blurry one. The trailing [AF x,y,w,h] is
+// the autofocus box in the sent JPEG's pixels, for spot-checking.
 func progressLine(n, total int, base string, res *fileResult) string {
 	stars := strings.Repeat("★", res.Rating)
+	var af string
+	if res.AFBox != "" {
+		af = "  [AF " + res.AFBox + "]"
+	}
 	switch res.Status {
 	case "sharp":
-		return fmt.Sprintf("%d/%d  %s  %s SHARP (conf %d)", n, total, base, stars, res.Confidence)
+		return fmt.Sprintf("%d/%d  %s  %s SHARP (conf %d)%s", n, total, base, stars, res.Confidence, af)
 	case "blurry":
-		return fmt.Sprintf("%d/%d  %s  %s BLURRY (%s, conf %d)", n, total, base, stars, res.BlurType, res.Confidence)
+		return fmt.Sprintf("%d/%d  %s  %s BLURRY (%s, conf %d)%s", n, total, base, stars, res.BlurType, res.Confidence, af)
 	default:
 		return fmt.Sprintf("%d/%d  %s  FAILED: %s", n, total, base, res.Error)
 	}
 }
 
-// processFile develops cr3Path to a resized JPEG, asks the VLM for a
-// blur verdict, and writes an XMP sidecar recording the result.
-func processFile(ctx context.Context, url string, size int, model, prompt, cr3Path string) (vllm.Verdict, error) {
-	jpeg, err := cr3.Develop(ctx, cr3Path, size)
+// processFile develops cr3Path to a resized JPEG, appends the camera's
+// autofocus box to the prompt (when the EXIF carries one), asks the VLM
+// for a blur verdict, and writes an XMP sidecar recording the result.
+// The second return value is the AF box as "x,y,w,h" in the sent JPEG's
+// pixels ("" when unavailable).
+func processFile(ctx context.Context, url string, size int, model, prompt, cr3Path string) (vllm.Verdict, string, error) {
+	jpg, err := cr3.Develop(ctx, cr3Path, size)
 	if err != nil {
-		return vllm.Verdict{}, err
+		return vllm.Verdict{}, "", err
 	}
-	v, err := vllm.Ask(ctx, url, model, prompt, jpeg)
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(jpg))
 	if err != nil {
-		return vllm.Verdict{}, err
+		return vllm.Verdict{}, "", fmt.Errorf("cr3: %s: decode developed JPEG: %w", filepath.Base(cr3Path), err)
+	}
+
+	// The VLM sees the resized JPEG, so the AF box must be expressed in
+	// that JPEG's pixels. AF parse failures are not fatal: fall back to
+	// the plain prompt (manual focus, whole-frame AF, non-Canon file).
+	var afPrompt, afBox string
+	if info, err := afbox.Parse(cr3Path); err == nil {
+		if b, ok := info.BoxFor(int(cfg.Width), int(cfg.Height)); ok {
+			afPrompt = b.PromptText(int(cfg.Width), int(cfg.Height))
+			afBox = b.String()
+		}
+	}
+
+	v, err := vllm.Ask(ctx, url, model, prompt+afPrompt, jpg)
+	if err != nil {
+		return vllm.Verdict{}, afBox, err
 	}
 	if err := xmp.WriteSidecar(ctx, cr3Path, v.SubjectBlurry, v.Rating(), v.Confidence, v.BlurType, v.Reason, model); err != nil {
-		return v, err
+		return v, afBox, err
 	}
-	return v, nil
+	return v, afBox, nil
 }
 
 // writeReport writes the JSON summary to path, or stdout when path

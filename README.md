@@ -82,7 +82,9 @@ make            # or: go build -o cr3blur ./cmd/cr3blur
 Other targets: `make check` (fmt-check + vet + test), `make test`, `make vet`,
 `make fmt`, `make tidy`, `make clean`.
 
-No external Go dependencies — stdlib plus `os/exec` for `sips`.
+One external Go dependency — [`evanoberholster/imagemeta`](https://github.com/evanoberholster/imagemeta)
+(pure-Go EXIF/maker-note parsing, used for the autofocus box) — plus
+`os/exec` for `sips`.
 
 ## Usage
 
@@ -124,16 +126,18 @@ Behavior:
 - **Progress**: one line per completed file:
 
   ```
-  12/184  O47A0217.CR3  ★★ SHARP (conf 92)
+  12/184  O47A0217.CR3  ★★ SHARP (conf 92)  [AF 448,356,55,56]
   13/184  O47A0218.CR3  ★ BLURRY (defocus, conf 71)
   14/184  O47A0219.CR3  FAILED: sips: exit status 1
   ```
 
   The star(s) before the status are the rating written to the sidecar
-  (2 = in focus, 1 = blurry).
+  (2 = in focus, 1 = blurry). The trailing `[AF x,y,w,h]` is the camera's
+  autofocus box in the sent JPEG's pixels (see [The prompt](#the-prompt)).
 
-- **Report**: a JSON summary (per-file verdicts, star ratings, and
-  sharp/blurry/failed counts) printed to stdout or written to `-report FILE`.
+- **Report**: a JSON summary (per-file verdicts, star ratings, the per-file
+  `af_box`, and sharp/blurry/failed counts) printed to stdout or written to
+  `-report FILE`.
 - **Exit codes**: `0` all ok, `1` fatal usage/env error, `2` completed with
   per-file failures.
 
@@ -146,11 +150,31 @@ defocus **and** motion blur and reply with a single JSON object:
 {"subject_blurry":bool,"confidence":0-100,"blur_type":"none|defocus|motion|both","reason":"..."}
 ```
 
+**Autofocus box.** Canon records the AF box used for each shot in the CR3's
+EXIF (MakerNote AFInfo record: one width/height/x/y tuple per AF point in a
+center-origin space — 6000×4000 on the R6 Mark II, 5472×3648 on the R6,
++X right, +Y up). `cr3blur` takes the bounding box of the recorded AF points
+(scales it to the resized JPEG the VLM actually sees, clamps to the frame)
+and appends a sentence to the prompt: the box's pixel rectangle, a coarse
+region label (e.g. "a small box in the center"), and the instruction to judge
+focus **only** for the subject inside (or nearest to) the box and ignore
+subjects outside it. That way the model judges what the camera actually
+focused on, not some other subject that happens to be sharpest in frame.
+
+- The box appears in the progress line and per-file report as
+  `af_box: "x,y,w,h"` (pixels of the sent JPEG).
+- No usable box → plain prompt, unchanged: manual focus, whole-frame AF
+  ("Whole Area AF"), missing/undecodable maker notes, or a non-Canon file.
+- Zone AF (81-point zones) yields the zone's bounding box; single-point AF
+  yields the point's box (which on the R6/R6 II varies in size with the
+  selected point — 243–647 AF units).
+
 The built-in prompt can be overridden with `-prompt TEXT` — handy for
 prompt calibration (e.g. teaching the model to ignore background softness
-or shallow-DoF bokeh). The response is still parsed into the fixed JSON
-schema above, so a custom prompt must ask the model to reply with the
-same object, or every file fails verdict parsing.
+or shallow-DoF bokeh). The AF-box sentence is appended to custom prompts
+too. The response is still parsed into the fixed JSON schema above, so a
+custom prompt must ask the model to reply with the same object, or every
+file fails verdict parsing.
 
 The response is parsed defensively (markdown fences / stray prose tolerated),
 validated against the `blur_type` enum and the 0–100 confidence range, and
@@ -184,6 +208,8 @@ atomic (temp file + rename).
 ```
 cmd/cr3blur/     CLI: flags, dir walk, worker pool, progress, JSON report
 internal/cr3/    CR3 → JPEG via sips (os/exec; 60 s timeout, stderr capture)
+internal/afbox/  Canon AF box from CR3 EXIF (maker notes) → prompt context,
+                 scaled to the sent JPEG's pixels
 internal/vllm/   llama-swap client: base64 image, strict-JSON prompt, retry,
                  verdict parsing, warmup
 internal/xmp/    XMP sidecar read/write (no-clobber splice, atomic write)
@@ -200,7 +226,9 @@ make check      # fmt-check + vet + test
 (or `go build ./... && go vet ./... && go test ./...`)
 
 Covered: XMP packet shape / well-formedness / splice-merge / no-clobber,
-verdict parsing (fenced, prose-wrapped, invalid), and the sips plumbing.
+verdict parsing (fenced, prose-wrapped, invalid), the sips plumbing, and the
+AF-box math (coordinate convention — +Y up — zone bounding boxes, scaling,
+clamping, whole-frame rejection, prompt text).
 
 ## Caveats & operational notes
 
