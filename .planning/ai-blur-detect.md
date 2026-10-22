@@ -63,6 +63,27 @@ Sample CR3 files for testing:
 - Fidelity note: sips output is a *developed* image (demosaicked, camera
   color pipeline, camera sharpening). That matches what a human sees when
   culling — the correct ground truth for subject-blur judgment.
+- **The autofocus box IS in the EXIF** (verified on EOS R6 and R6 Mark II
+  CR3s, exiftool + imagemeta): Canon's MakerNote **AFInfo record** (tag
+  0x0026) holds one width/height/x/y tuple per AF point (1053 slots on
+  both bodies; valid points occupy a contiguous prefix — 1 tuple for
+  single-point AF, 81 for a 9×9 zone) in a **center-origin** coordinate
+  space sized by AFImageWidth/Height: **6000×4000 on the R6 Mark II,
+  5472×3648 on the R6** (== the developed frame size in both cases).
+  **Axes: +X right, +Y up** — proven, not assumed: under a Y-down reading,
+  ~40% of a real shoot's recorded boxes fall entirely outside the frame
+  (impossible); under Y-up every box is in-frame. Converting to top-left
+  image pixels: `left = W/2 + x − w/2`, `top = H/2 − y − h/2`.
+  Box sizes vary per AF point (243–647 AF units on the R6m2) — the
+  "range of sizes" visible on the camera. The AFAreaMode word gives the
+  mode (e.g. 7 = Zone AF, 19–21 = Flexible Zone AF 1/2/3, 22 = Whole
+  Area). Older DSLRs (pre-2010s) use a different AFInfo layout (tag
+  0x0012) — not needed for the R-series.
+- sips **drops the Canon maker notes** in its JPEG output, so the box
+  must be read from the CR3 itself (Go: `evanoberholster/imagemeta`
+  decodes the CR3's ISOBMFF + Canon maker notes; v1.0.0 works on Go 1.24+).
+  Note: imagemeta's own derived `AFPoints` rectangles assume +Y *down* —
+  wrong for these cameras; compute from the raw `AFArea` tuples instead.
 
 ## 4. Vision model
 
@@ -115,6 +136,16 @@ curl -s http://localhost:8080/v1/chat/completions -H 'Content-Type: application/
    {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,$B64"}}]}]}
 EOF
 ```
+
+**AF-box prompt addition (implemented in `internal/afbox`):** when the
+EXIF carries a usable AF box, a sentence is appended to the prompt giving
+the box as a pixel rectangle **in the sent JPEG's coordinates** (the box
+is scaled from the camera's AF space to the resized JPEG — the VLM never
+sees full-res pixels), plus a coarse region/size label, plus the
+instruction to judge only the subject inside (or nearest to) the box and
+ignore subjects outside it. Whole-frame AF / MF / missing data → plain
+prompt. The box is echoed in the progress line and report
+(`af_box: "x,y,w,h"`) for spot-checking.
 
 ## 6. Go tool design (planned)
 
